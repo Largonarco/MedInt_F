@@ -8,21 +8,17 @@ import { Button, Listbox, ListboxItem } from "@nextui-org/react";
 export default function Home() {
 	const { enqueueSnackbar } = useSnackbar();
 	const [summary, setSummary] = useState("");
-	const [sessionId, setSessionId] = useState("");
+	const [isRecording, setIsRecording] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
 	const [isProcessing, setIsProcessing] = useState(false);
 	const [doctorMessages, setDoctorMessages] = useState([]);
 	const [patientMessages, setPatientMessages] = useState([]);
 	const [currentTranslation, setCurrentTranslation] = useState("");
-	const [isRecordingDoctor, setIsRecordingDoctor] = useState(false);
-	const [isRecordingPatient, setIsRecordingPatient] = useState(false);
 
 	const websocketRef = useRef(null);
 	const audioDeltasRef = useRef([]);
-	const doctorAudioChunksRef = useRef([]);
-	const patientAudioChunksRef = useRef([]);
-	const doctorMediaRecorderRef = useRef(null);
-	const patientMediaRecorderRef = useRef(null);
+	const audioChunksRef = useRef([]);
+	const mediaRecorderRef = useRef(null);
 
 	useEffect(() => {
 		setupWebSocket();
@@ -59,10 +55,6 @@ export default function Home() {
 
 	const handleWebSocketMessage = (message) => {
 		switch (message.type) {
-			case "session":
-				setSessionId(message.session_id);
-				break;
-
 			case "openai_connected":
 				setIsConnected(true);
 				enqueueSnackbar("Connected to service", { variant: "success" });
@@ -74,15 +66,14 @@ export default function Home() {
 
 			case "text_response_done":
 				setCurrentTranslation("");
+
 				// Update appropriate message list based on who was speaking
-				if (isRecordingDoctor) {
+				if (message?.role === "doctor") {
 					setDoctorMessages((prev) => [...prev, message.text]);
-					setIsRecordingDoctor(false);
-				} else if (isRecordingPatient) {
+				} else if (message?.role === "patient") {
 					setPatientMessages((prev) => [...prev, message.text]);
-					setIsRecordingPatient(false);
 				}
-				// Only set isProcessing to false when we're actually done processing
+
 				setIsProcessing(false);
 				break;
 
@@ -102,10 +93,10 @@ export default function Home() {
 				break;
 
 			case "error":
-				enqueueSnackbar(`Error: ${message.message}`, { variant: "error" });
+				setIsRecording(false);
 				setIsProcessing(false);
-				setIsRecordingDoctor(false);
-				setIsRecordingPatient(false);
+
+				enqueueSnackbar(`Error: ${message.message}`, { variant: "error" });
 				break;
 		}
 	};
@@ -153,7 +144,7 @@ export default function Home() {
 		return btoa(binaryString);
 	};
 
-	const startRecording = async (role) => {
+	const startRecording = async () => {
 		if (!isConnected) {
 			enqueueSnackbar("Not connected to service", { variant: "warning" });
 			return;
@@ -162,54 +153,42 @@ export default function Home() {
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({
 				audio: {
-					sampleRate: 24000,
-					channelCount: 1,
 					sampleSize: 16,
+					channelCount: 1,
+					sampleRate: 24000,
 				},
 			});
+
 			const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
 
 			mediaRecorder.ondataavailable = (event) => {
 				if (event.data.size > 0) {
-					if (role === "patient") {
-						patientAudioChunksRef.current.push(event.data);
-					} else {
-						doctorAudioChunksRef.current.push(event.data);
-					}
+					audioChunksRef.current.push(event.data);
 				}
 			};
-
 			mediaRecorder.onstop = async () => {
-				const audioChunks = role === "patient" ? patientAudioChunksRef.current : doctorAudioChunksRef.current;
+				const audioChunks = audioChunksRef.current;
 				const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
-				if (role === "patient") {
-					patientAudioChunksRef.current = [];
-				} else {
-					doctorAudioChunksRef.current = [];
-				}
 				const base64Audio = await convertTo16BitPCM(audioBlob);
-				sendAudioToAPI(base64Audio, role);
+				audioChunks.current = [];
+
+				sendAudioToAPI(base64Audio);
 			};
 
 			mediaRecorder.start(100);
-			if (role === "patient") {
-				patientMediaRecorderRef.current = mediaRecorder;
-				setIsRecordingPatient(true);
-			} else {
-				doctorMediaRecorderRef.current = mediaRecorder;
-				setIsRecordingDoctor(true);
-			}
-			setIsProcessing(true);
+			mediaRecorderRef.current = mediaRecorder;
+			setIsRecording(true);
 		} catch (e) {
 			enqueueSnackbar("Could not access microphone", { variant: "error" });
 		}
 	};
 
-	const stopRecording = (role) => {
-		const recorderRef = role === "patient" ? patientMediaRecorderRef : doctorMediaRecorderRef;
-		if (recorderRef.current) {
-			recorderRef.current.stop();
-			recorderRef.current.stream.getTracks().forEach((track) => track.stop());
+	const stopRecording = () => {
+		if (mediaRecorderRef.current) {
+			mediaRecorderRef.current.stop();
+			mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop());
+
+			setIsRecording(false);
 		}
 	};
 
@@ -237,7 +216,7 @@ export default function Home() {
 		}
 	};
 
-	const sendAudioToAPI = (base64Audio, role) => {
+	const sendAudioToAPI = (base64Audio) => {
 		if (!websocketRef.current || websocketRef.current.readyState !== WebSocket.OPEN) {
 			enqueueSnackbar("Not connected to service", { variant: "error" });
 			return;
@@ -245,7 +224,7 @@ export default function Home() {
 
 		websocketRef.current.send(
 			JSON.stringify({
-				type: role === "patient" ? "patient_speech" : "doctor_speech",
+				type: "begin_conversation",
 				audio: base64Audio,
 			})
 		);
@@ -292,13 +271,6 @@ export default function Home() {
 							</ListboxItem>
 						))}
 					</Listbox>
-					<Button
-						className="w-full mt-4"
-						color={isRecordingPatient ? "danger" : "primary"}
-						isDisabled={!isConnected && !isRecordingPatient}
-						onPress={isRecordingPatient ? () => stopRecording("patient") : () => startRecording("patient")}>
-						{isRecordingPatient ? "Stop Patient Recording" : "Start Patient Recording"}
-					</Button>
 				</div>
 
 				<div className="w-full lg:w-1/2 p-4">
@@ -313,15 +285,16 @@ export default function Home() {
 							</ListboxItem>
 						))}
 					</Listbox>
-					<Button
-						className="w-full mt-4"
-						color={isRecordingDoctor ? "danger" : "primary"}
-						isDisabled={!isConnected && !isRecordingDoctor}
-						onPress={isRecordingDoctor ? () => stopRecording("doctor") : () => startRecording("doctor")}>
-						{isRecordingDoctor ? "Stop Doctor Recording" : "Start Doctor Recording"}
-					</Button>
 				</div>
 			</div>
+
+			<Button
+				className="w-full mt-4"
+				color={isRecording ? "danger" : "primary"}
+				isDisabled={!isConnected && !isRecording}
+				onPress={isRecording ? stopRecording : startRecording}>
+				{isRecording ? "Stop Recording" : "Start Recording"}
+			</Button>
 		</div>
 	);
 }
