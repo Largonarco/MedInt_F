@@ -1,40 +1,31 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
-import { SnackbarProvider, useSnackbar } from "notistack";
+import { useSnackbar } from "notistack";
 import { PiSpeakerHighFill } from "react-icons/pi";
-import { Button, Listbox, ListboxItem, Textarea } from "@nextui-org/react";
+import { useRef, useState, useEffect } from "react";
+import { Button, Listbox, ListboxItem } from "@nextui-org/react";
 
 export default function Home() {
-	return (
-		<SnackbarProvider>
-			<AppContent />
-		</SnackbarProvider>
-	);
-}
-
-function AppContent() {
 	const { enqueueSnackbar } = useSnackbar();
 	const [summary, setSummary] = useState("");
-	const [doctorMessages, setDoctorMessages] = useState([]);
-	const [isRecordingDoctor, setIsRecordingDoctor] = useState(false);
-	const [patientMessages, setPatientMessages] = useState([]);
-	const [isRecordingPatient, setIsRecordingPatient] = useState(false);
-	const [isProcessing, setIsProcessing] = useState(false);
-	const [currentTranslation, setCurrentTranslation] = useState("");
 	const [sessionId, setSessionId] = useState("");
 	const [isConnected, setIsConnected] = useState(false);
+	const [isProcessing, setIsProcessing] = useState(false);
+	const [doctorMessages, setDoctorMessages] = useState([]);
+	const [patientMessages, setPatientMessages] = useState([]);
+	const [currentTranslation, setCurrentTranslation] = useState("");
+	const [isRecordingDoctor, setIsRecordingDoctor] = useState(false);
+	const [isRecordingPatient, setIsRecordingPatient] = useState(false);
 
 	const websocketRef = useRef(null);
-	const patientMediaRecorderRef = useRef(null);
-	const doctorMediaRecorderRef = useRef(null);
-	const patientAudioChunksRef = useRef([]);
+	const audioDeltasRef = useRef([]);
 	const doctorAudioChunksRef = useRef([]);
-	const audioDeltasRef = useRef([]); // Accumulate audio deltas here
+	const patientAudioChunksRef = useRef([]);
+	const doctorMediaRecorderRef = useRef(null);
+	const patientMediaRecorderRef = useRef(null);
 
 	useEffect(() => {
-		connectWebSocket();
-
+		setupWebSocket();
 		return () => {
 			if (websocketRef.current) {
 				websocketRef.current.close();
@@ -42,23 +33,21 @@ function AppContent() {
 		};
 	}, []);
 
-	const connectWebSocket = () => {
+	const setupWebSocket = () => {
 		const ws = new WebSocket("ws://localhost:8000/ws");
 		websocketRef.current = ws;
 
 		ws.onopen = () => {
-			console.log("WebSocket connection established");
+			setIsConnected(true);
 			ws.send(JSON.stringify({ type: "connect" }));
 		};
 
 		ws.onclose = () => {
-			console.log("WebSocket connection closed");
 			setIsConnected(false);
 			setTimeout(connectWebSocket, 3000);
 		};
 
-		ws.onerror = (error) => {
-			console.error("WebSocket error:", error);
+		ws.onerror = () => {
 			enqueueSnackbar("Connection error. Trying to reconnect...", { variant: "error" });
 		};
 
@@ -84,28 +73,28 @@ function AppContent() {
 				break;
 
 			case "text_response_done":
-				if (isProcessing) {
-					if (isRecordingDoctor) {
-						setDoctorMessages((prev) => [...prev, message.text]);
-					} else {
-						setPatientMessages((prev) => [...prev, message.text]);
-					}
-					setCurrentTranslation("");
-					setIsProcessing(false);
+				setCurrentTranslation("");
+				// Update appropriate message list based on who was speaking
+				if (isRecordingDoctor) {
+					setDoctorMessages((prev) => [...prev, message.text]);
+					setIsRecordingDoctor(false);
+				} else if (isRecordingPatient) {
+					setPatientMessages((prev) => [...prev, message.text]);
+					setIsRecordingPatient(false);
 				}
+				// Only set isProcessing to false when we're actually done processing
+				setIsProcessing(false);
 				break;
 
 			case "audio_response_delta":
-				audioDeltasRef.current.push(message.delta); // Accumulate audio deltas
+				audioDeltasRef.current.push(message.delta);
 				break;
 
 			case "audio_response_done":
-				const fullBase64Audio = audioDeltasRef.current.join(""); // Combine all deltas
-				console.log(fullBase64Audio);
-
+				const fullBase64Audio = audioDeltasRef.current.join("");
 				const audioData = base64ToArrayBuffer(fullBase64Audio);
-				playAudio(audioData);
-				audioDeltasRef.current = []; // Reset deltas
+				playAudioAuto(audioData);
+				audioDeltasRef.current = [];
 				break;
 
 			case "action_executed":
@@ -115,6 +104,8 @@ function AppContent() {
 			case "error":
 				enqueueSnackbar(`Error: ${message.message}`, { variant: "error" });
 				setIsProcessing(false);
+				setIsRecordingDoctor(false);
+				setIsRecordingPatient(false);
 				break;
 		}
 	};
@@ -129,176 +120,161 @@ function AppContent() {
 		return bytes.buffer;
 	};
 
-	const playAudio = async (audioData) => {
+	// Convert raw audio data to 16-bit PCM at 24kHz and encode as base64
+	const convertTo16BitPCM = async (audioBlob) => {
+		const audioContext = new OfflineAudioContext(1, 48000, 48000); // Temporary context at 48kHz
+		const arrayBuffer = await audioBlob.arrayBuffer();
+		const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+		// Resample to 24kHz
+		const offlineContext = new OfflineAudioContext(1, audioBuffer.length * (24000 / audioBuffer.sampleRate), 24000);
+		const source = offlineContext.createBufferSource();
+		source.buffer = audioBuffer;
+		source.connect(offlineContext.destination);
+		source.start(0);
+		const resampledBuffer = await offlineContext.startRendering();
+
+		// Convert to 16-bit PCM (mono)
+		const float32Data = resampledBuffer.getChannelData(0); // Mono channel
+		const pcm16Array = new Int16Array(float32Data.length);
+		for (let i = 0; i < float32Data.length; i++) {
+			const sample = Math.max(-1, Math.min(1, float32Data[i])); // Clamp to [-1, 1]
+			pcm16Array[i] = sample < 0 ? sample * 32768 : sample * 32767; // Convert to 16-bit
+		}
+
+		// Convert to base64
+		const uint8Array = new Uint8Array(pcm16Array.buffer);
+		let binaryString = "";
+		const chunkSize = 8000; // Process in chunks to avoid stack overflow
+		for (let i = 0; i < uint8Array.length; i += chunkSize) {
+			const chunk = uint8Array.subarray(i, i + chunkSize);
+			binaryString += String.fromCharCode(...chunk);
+		}
+		return btoa(binaryString);
+	};
+
+	const startRecording = async (role) => {
+		if (!isConnected) {
+			enqueueSnackbar("Not connected to service", { variant: "warning" });
+			return;
+		}
+
 		try {
-			console.log("Starting audio playback for 16-bit PCM");
+			const stream = await navigator.mediaDevices.getUserMedia({
+				audio: {
+					sampleRate: 24000,
+					channelCount: 1,
+					sampleSize: 16,
+				},
+			});
+			const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
 
-			// Step 1: Create an AudioContext with the correct sample rate
-			const audioContext = new AudioContext({ sampleRate: 24000 }); // Match the 24kHz sample rate
+			mediaRecorder.ondataavailable = (event) => {
+				if (event.data.size > 0) {
+					if (role === "patient") {
+						patientAudioChunksRef.current.push(event.data);
+					} else {
+						doctorAudioChunksRef.current.push(event.data);
+					}
+				}
+			};
 
-			// Step 2: Convert ArrayBuffer (16-bit PCM) to 32-bit float PCM
-			const rawData = new Int16Array(audioData); // 16-bit PCM is typically signed 16-bit integers
-			const sampleCount = rawData.length;
-			const float32Array = new Float32Array(sampleCount);
+			mediaRecorder.onstop = async () => {
+				const audioChunks = role === "patient" ? patientAudioChunksRef.current : doctorAudioChunksRef.current;
+				const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+				if (role === "patient") {
+					patientAudioChunksRef.current = [];
+				} else {
+					doctorAudioChunksRef.current = [];
+				}
+				const base64Audio = await convertTo16BitPCM(audioBlob);
+				sendAudioToAPI(base64Audio, role);
+			};
 
-			// Step 3: Convert 16-bit PCM to 32-bit float
-			for (let i = 0; i < sampleCount; i++) {
-				// Normalize 16-bit signed integer (-32768 to 32767) to 32-bit float (-1.0 to 1.0)
-				float32Array[i] = rawData[i] / 32768.0;
+			mediaRecorder.start(100);
+			if (role === "patient") {
+				patientMediaRecorderRef.current = mediaRecorder;
+				setIsRecordingPatient(true);
+			} else {
+				doctorMediaRecorderRef.current = mediaRecorder;
+				setIsRecordingDoctor(true);
+			}
+			setIsProcessing(true);
+		} catch (e) {
+			enqueueSnackbar("Could not access microphone", { variant: "error" });
+		}
+	};
+
+	const stopRecording = (role) => {
+		const recorderRef = role === "patient" ? patientMediaRecorderRef : doctorMediaRecorderRef;
+		if (recorderRef.current) {
+			recorderRef.current.stop();
+			recorderRef.current.stream.getTracks().forEach((track) => track.stop());
+		}
+	};
+
+	const playAudioAuto = async (audioData) => {
+		try {
+			const audioContext = new AudioContext({ sampleRate: 24000 }); // Match 24kHz sample rate
+
+			const rawData = new Int16Array(audioData); // 16-bit PCM
+			const float32Array = new Float32Array(rawData.length);
+
+			for (let i = 0; i < rawData.length; i++) {
+				float32Array[i] = rawData[i] / 32768.0; // Normalize to -1.0 to 1.0
 			}
 
-			// Step 4: Create an AudioBuffer
 			const audioBuffer = audioContext.createBuffer(1, float32Array.length, audioContext.sampleRate);
 			audioBuffer.getChannelData(0).set(float32Array);
 
-			// Step 5: Play the audio
 			const source = audioContext.createBufferSource();
 			source.buffer = audioBuffer;
 			source.connect(audioContext.destination);
-			source.onended = () => {
-				console.log("Audio playback completed");
-				source.disconnect();
-			};
+			source.onended = () => source.disconnect();
 			source.start();
-
-			console.log("Audio playback started successfully");
 		} catch (error) {
-			console.error("Error in audio playback:", error);
 			enqueueSnackbar(`Audio playback error: ${error.message}`, { variant: "error" });
 		}
 	};
 
-	const startPatientRecording = async () => {
-		if (!isConnected) {
-			enqueueSnackbar("Not connected to service", { variant: "warning" });
-			return;
-		}
-
-		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			const mediaRecorder = new MediaRecorder(stream);
-
-			mediaRecorder.ondataavailable = (event) => {
-				if (event.data.size > 0) {
-					patientAudioChunksRef.current.push(event.data);
-				}
-			};
-
-			mediaRecorder.onstop = () => {
-				const audioBlob = new Blob(patientAudioChunksRef.current, { type: "audio/wav" });
-				patientAudioChunksRef.current = [];
-				sendAudioToAPI(audioBlob, "patient");
-			};
-
-			mediaRecorder.start();
-			patientMediaRecorderRef.current = mediaRecorder;
-			setIsRecordingPatient(true);
-		} catch (error) {
-			console.error("Error starting patient recording:", error);
-			enqueueSnackbar("Could not access microphone", { variant: "error" });
-		}
-	};
-
-	const stopPatientRecording = () => {
-		if (patientMediaRecorderRef.current) {
-			patientMediaRecorderRef.current.stop();
-			setIsRecordingPatient(false);
-			setIsProcessing(true);
-		}
-	};
-
-	const startDoctorRecording = async () => {
-		if (!isConnected) {
-			enqueueSnackbar("Not connected to service", { variant: "warning" });
-			return;
-		}
-
-		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			const mediaRecorder = new MediaRecorder(stream);
-
-			mediaRecorder.ondataavailable = (event) => {
-				if (event.data.size > 0) {
-					doctorAudioChunksRef.current.push(event.data);
-				}
-			};
-
-			mediaRecorder.onstop = () => {
-				const audioBlob = new Blob(doctorAudioChunksRef.current, { type: "audio/wav" });
-				doctorAudioChunksRef.current = [];
-				sendAudioToAPI(audioBlob, "doctor");
-			};
-
-			mediaRecorder.start();
-			doctorMediaRecorderRef.current = mediaRecorder;
-			setIsRecordingDoctor(true);
-		} catch (error) {
-			console.error("Error starting doctor recording:", error);
-			enqueueSnackbar("Could not access microphone", { variant: "error" });
-		}
-	};
-
-	const stopDoctorRecording = () => {
-		if (doctorMediaRecorderRef.current) {
-			doctorMediaRecorderRef.current.stop();
-			setIsRecordingDoctor(false);
-			setIsProcessing(true);
-		}
-	};
-
-	const sendAudioToAPI = async (audioBlob, role) => {
+	const sendAudioToAPI = (base64Audio, role) => {
 		if (!websocketRef.current || websocketRef.current.readyState !== WebSocket.OPEN) {
 			enqueueSnackbar("Not connected to service", { variant: "error" });
 			return;
 		}
 
-		try {
-			const reader = new FileReader();
-			reader.readAsDataURL(audioBlob);
-			reader.onloadend = () => {
-				const base64data = reader.result.split(",")[1];
-				websocketRef.current.send(
-					JSON.stringify({
-						type: role === "patient" ? "patient_speech" : "doctor_speech",
-						audio: base64data,
-					})
-				);
-			};
-		} catch (error) {
-			console.error(`Error sending ${role} audio:`, error);
-			enqueueSnackbar(`Error sending audio: ${error.message}`, { variant: "error" });
-		}
+		websocketRef.current.send(
+			JSON.stringify({
+				type: role === "patient" ? "patient_speech" : "doctor_speech",
+				audio: base64Audio,
+			})
+		);
 	};
 
-	const handlePlayAudio = async (text) => {
+	const handlePlayAudio = (text) => {
 		const utterance = new SpeechSynthesisUtterance(text);
 		window.speechSynthesis.speak(utterance);
 	};
 
-	const handleGetSummary = async () => {
-		if (!websocketRef.current || websocketRef.current.readyState !== WebSocket.OPEN) {
-			enqueueSnackbar("Not connected to service", { variant: "error" });
-			return;
-		}
+	// const handleGetSummary = async () => {
+	// 	if (!websocketRef.current || websocketRef.current.readyState !== WebSocket.OPEN) {
+	// 		enqueueSnackbar("Not connected to service", { variant: "error" });
+	// 		return;
+	// 	}
 
-		try {
-			websocketRef.current.send(JSON.stringify({ type: "get_summary" }));
-			setIsProcessing(true);
-		} catch (error) {
-			console.error("Error getting summary:", error);
-			enqueueSnackbar(`Error getting summary: ${error.message}`, { variant: "error" });
-		}
-	};
+	// 	setIsProcessing(true);
+	// 	websocketRef.current.send(JSON.stringify({ type: "get_summary" }));
+	// };
 
 	return (
 		<div>
 			<div className="p-4 bg-blue-100 mb-4 rounded">
-				<h1 className="text-3xl font-bold mb-2">Medical Interpreter</h1>
-				<p>Status: {isConnected ? "Connected" : "Disconnecting..."}</p>
-				{isProcessing && (
+				<p>Status: {isConnected ? "Connected" : "Disconnected"}</p>
+
+				{currentTranslation && (
 					<div className="mt-2 p-2 bg-gray-100 rounded">
-						<p className="font-semibold">Processing:</p>
-						<p>{currentTranslation || "..."}</p>
+						<p className="font-semibold">Translation in progress:</p>
+						<p>{currentTranslation}</p>
 					</div>
 				)}
 			</div>
@@ -317,10 +293,10 @@ function AppContent() {
 						))}
 					</Listbox>
 					<Button
-						onPress={isRecordingPatient ? stopPatientRecording : startPatientRecording}
 						className="w-full mt-4"
 						color={isRecordingPatient ? "danger" : "primary"}
-						isDisabled={isProcessing || isRecordingDoctor}>
+						isDisabled={!isConnected && !isRecordingPatient}
+						onPress={isRecordingPatient ? () => stopRecording("patient") : () => startRecording("patient")}>
 						{isRecordingPatient ? "Stop Patient Recording" : "Start Patient Recording"}
 					</Button>
 				</div>
@@ -338,27 +314,14 @@ function AppContent() {
 						))}
 					</Listbox>
 					<Button
-						onPress={isRecordingDoctor ? stopDoctorRecording : startDoctorRecording}
 						className="w-full mt-4"
 						color={isRecordingDoctor ? "danger" : "primary"}
-						isDisabled={isProcessing || isRecordingPatient}>
+						isDisabled={!isConnected && !isRecordingDoctor}
+						onPress={isRecordingDoctor ? () => stopRecording("doctor") : () => startRecording("doctor")}>
 						{isRecordingDoctor ? "Stop Doctor Recording" : "Start Doctor Recording"}
 					</Button>
 				</div>
 			</div>
-
-			<Button
-				className="m-4 mt-8"
-				onPress={handleGetSummary}
-				isDisabled={
-					isProcessing ||
-					isRecordingDoctor ||
-					isRecordingPatient ||
-					(doctorMessages.length === 0 && patientMessages.length === 0)
-				}>
-				Summarize conversation
-			</Button>
-			<Textarea className="m-4" placeholder="Summary of conversation" isReadOnly value={summary} minRows={4} />
 		</div>
 	);
 }
