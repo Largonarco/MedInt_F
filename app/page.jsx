@@ -11,10 +11,8 @@ export default function Home() {
 	const [summary, setSummary] = useState("");
 	const [isRecording, setIsRecording] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
-	const [isProcessing, setIsProcessing] = useState(false);
 	const [doctorMessages, setDoctorMessages] = useState([]);
 	const [patientMessages, setPatientMessages] = useState([]);
-	const [currentTranslation, setCurrentTranslation] = useState("");
 
 	const websocketRef = useRef(null);
 	const audioDeltasRef = useRef([]);
@@ -78,16 +76,12 @@ export default function Home() {
 				break;
 
 			case "response_done":
-				setCurrentTranslation("");
-
 				// Update appropriate message list based on who was speaking
 				if (message?.role === "doctor") {
 					setDoctorMessages((prev) => [...prev, message.text]);
 				} else if (message?.role === "patient") {
 					setPatientMessages((prev) => [...prev, message.text]);
 				}
-
-				setIsProcessing(false);
 				break;
 
 			case "action_executed":
@@ -96,8 +90,6 @@ export default function Home() {
 
 			case "error":
 				setIsRecording(false);
-				setIsProcessing(false);
-
 				enqueueSnackbar(`Error: ${message.message}`, { variant: "error" });
 				break;
 		}
@@ -184,7 +176,6 @@ export default function Home() {
 			return;
 		}
 
-		setIsProcessing(true);
 		websocketRef.current.send(JSON.stringify({ type: "get_summary" }));
 	};
 
@@ -226,8 +217,8 @@ export default function Home() {
 
 			<Button
 				className="w-full mb-8"
+				isDisabled={!isConnected}
 				color={isRecording ? "danger" : "primary"}
-				isDisabled={!isConnected && !isRecording}
 				onPress={isRecording ? stopRecording : startRecording}>
 				{isRecording ? "Stop Recording" : "Start Recording"}
 			</Button>
