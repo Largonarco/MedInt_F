@@ -3,11 +3,12 @@
 import { useSnackbar } from "notistack";
 import { PiSpeakerHighFill } from "react-icons/pi";
 import { useRef, useState, useEffect } from "react";
-import { Button, Listbox, ListboxItem } from "@nextui-org/react";
+import { Button, Listbox, ListboxItem, Textarea } from "@nextui-org/react";
 import { convertBase64Encoded16BitPCMToRawAudio, convertRawAudioTo16BitPCMBase64 } from "./utils/sound";
 
 export default function Home() {
 	const { enqueueSnackbar } = useSnackbar();
+	const [summary, setSummary] = useState("");
 	const [isRecording, setIsRecording] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
 	const [isProcessing, setIsProcessing] = useState(false);
@@ -60,17 +61,8 @@ export default function Home() {
 				enqueueSnackbar("Connected to service", { variant: "success" });
 				break;
 
-			case "response_done":
-				setCurrentTranslation("");
-
-				// Update appropriate message list based on who was speaking
-				if (message?.role === "doctor") {
-					setDoctorMessages((prev) => [...prev, message.text]);
-				} else if (message?.role === "patient") {
-					setPatientMessages((prev) => [...prev, message.text]);
-				}
-
-				setIsProcessing(false);
+			case "text_done":
+				setSummary(message.text);
 				break;
 
 			case "audio_response_delta":
@@ -83,6 +75,19 @@ export default function Home() {
 				playAudio(audioData);
 
 				audioDeltasRef.current = [];
+				break;
+
+			case "response_done":
+				setCurrentTranslation("");
+
+				// Update appropriate message list based on who was speaking
+				if (message?.role === "doctor") {
+					setDoctorMessages((prev) => [...prev, message.text]);
+				} else if (message?.role === "patient") {
+					setPatientMessages((prev) => [...prev, message.text]);
+				}
+
+				setIsProcessing(false);
 				break;
 
 			case "action_executed":
@@ -173,23 +178,23 @@ export default function Home() {
 		window.speechSynthesis.speak(utterance);
 	};
 
-	// const handleGetSummary = async () => {
-	// 	if (!websocketRef.current || websocketRef.current.readyState !== WebSocket.OPEN) {
-	// 		enqueueSnackbar("Not connected to service", { variant: "error" });
-	// 		return;
-	// 	}
+	const handleGetSummary = async () => {
+		if (!isConnected) {
+			enqueueSnackbar("Not connected to service", { variant: "error" });
+			return;
+		}
 
-	// 	setIsProcessing(true);
-	// 	websocketRef.current.send(JSON.stringify({ type: "get_summary" }));
-	// };
+		setIsProcessing(true);
+		websocketRef.current.send(JSON.stringify({ type: "get_summary" }));
+	};
 
 	return (
 		<div>
-			<div className="p-4 bg-blue-100 mb-4 rounded">
+			<div className="p-4 bg-gray-100 mb-8 rounded-md">
 				<p>Status: {isConnected ? "Connected" : "Disconnected"}</p>
 			</div>
 
-			<div className="w-full flex flex-col lg:flex-row">
+			<div className="w-full flex flex-col lg:flex-row mb-4">
 				<div className="w-full lg:w-1/2 p-4 border-b lg:border-b-0 lg:border-r border-gray-300">
 					<h2 className="text-2xl mb-4">Patient (Spanish)</h2>
 					<Listbox aria-label="Patient Transcripts">
@@ -220,12 +225,17 @@ export default function Home() {
 			</div>
 
 			<Button
-				className="w-full mt-4"
+				className="w-full mb-8"
 				color={isRecording ? "danger" : "primary"}
 				isDisabled={!isConnected && !isRecording}
 				onPress={isRecording ? stopRecording : startRecording}>
 				{isRecording ? "Stop Recording" : "Start Recording"}
 			</Button>
+
+			<Button className="mb-4 rounded-md" onPress={handleGetSummary}>
+				Summarize conversation
+			</Button>
+			<Textarea placeholder="Conversational Summary" isReadOnly value={summary} />
 		</div>
 	);
 }

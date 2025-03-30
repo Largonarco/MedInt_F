@@ -17,9 +17,15 @@ export default function RootLayout({ children }) {
 			<body className={`${poppinsFont.className} antialiased`}>
 				<NextUIProvider>
 					<SnackbarProvider>
-						<h2 className="text-4xl ml-4 mt-8">Sully Interpreter AI</h2>
-						<h3 className="ml-4 mb-16">Speak in spanish/english, click message to speak it out</h3>
-						{children}
+						<div className="py-6 px-4">
+							<h2 className="text-4xl mb-2">Sully Interpreter AI</h2>
+							<h3 className="mb-8">
+								Speak in Spanish / English, click &quot;Start Recording&quot; to record and &quot;Stop Recording&quot;
+								to process the audio.
+							</h3>
+
+							{children}
+						</div>
 					</SnackbarProvider>
 				</NextUIProvider>
 			</body>
