@@ -4,10 +4,10 @@ import { useSnackbar } from "notistack";
 import { PiSpeakerHighFill } from "react-icons/pi";
 import { useRef, useState, useEffect } from "react";
 import { Button, Listbox, ListboxItem } from "@nextui-org/react";
+import { convertBase64Encoded16BitPCMToRawAudio, convertRawAudioTo16BitPCMBase64 } from "./utils/sound";
 
 export default function Home() {
 	const { enqueueSnackbar } = useSnackbar();
-	const [summary, setSummary] = useState("");
 	const [isRecording, setIsRecording] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
 	const [isProcessing, setIsProcessing] = useState(false);
@@ -60,11 +60,7 @@ export default function Home() {
 				enqueueSnackbar("Connected to service", { variant: "success" });
 				break;
 
-			case "text_response_delta":
-				setCurrentTranslation((prev) => prev + message.delta);
-				break;
-
-			case "text_response_done":
+			case "response_done":
 				setCurrentTranslation("");
 
 				// Update appropriate message list based on who was speaking
@@ -83,8 +79,9 @@ export default function Home() {
 
 			case "audio_response_done":
 				const fullBase64Audio = audioDeltasRef.current.join("");
-				const audioData = base64ToArrayBuffer(fullBase64Audio);
-				playAudioAuto(audioData);
+				const audioData = convertBase64Encoded16BitPCMToRawAudio(fullBase64Audio);
+				playAudio(audioData);
+
 				audioDeltasRef.current = [];
 				break;
 
@@ -99,49 +96,6 @@ export default function Home() {
 				enqueueSnackbar(`Error: ${message.message}`, { variant: "error" });
 				break;
 		}
-	};
-
-	const base64ToArrayBuffer = (base64) => {
-		const base64Data = base64.includes(",") ? base64.split(",")[1] : base64;
-		const binaryString = window.atob(base64Data);
-		const bytes = new Uint8Array(binaryString.length);
-		for (let i = 0; i < binaryString.length; i++) {
-			bytes[i] = binaryString.charCodeAt(i);
-		}
-		return bytes.buffer;
-	};
-
-	// Convert raw audio data to 16-bit PCM at 24kHz and encode as base64
-	const convertTo16BitPCM = async (audioBlob) => {
-		const audioContext = new OfflineAudioContext(1, 48000, 48000); // Temporary context at 48kHz
-		const arrayBuffer = await audioBlob.arrayBuffer();
-		const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-		// Resample to 24kHz
-		const offlineContext = new OfflineAudioContext(1, audioBuffer.length * (24000 / audioBuffer.sampleRate), 24000);
-		const source = offlineContext.createBufferSource();
-		source.buffer = audioBuffer;
-		source.connect(offlineContext.destination);
-		source.start(0);
-		const resampledBuffer = await offlineContext.startRendering();
-
-		// Convert to 16-bit PCM (mono)
-		const float32Data = resampledBuffer.getChannelData(0); // Mono channel
-		const pcm16Array = new Int16Array(float32Data.length);
-		for (let i = 0; i < float32Data.length; i++) {
-			const sample = Math.max(-1, Math.min(1, float32Data[i])); // Clamp to [-1, 1]
-			pcm16Array[i] = sample < 0 ? sample * 32768 : sample * 32767; // Convert to 16-bit
-		}
-
-		// Convert to base64
-		const uint8Array = new Uint8Array(pcm16Array.buffer);
-		let binaryString = "";
-		const chunkSize = 8000; // Process in chunks to avoid stack overflow
-		for (let i = 0; i < uint8Array.length; i += chunkSize) {
-			const chunk = uint8Array.subarray(i, i + chunkSize);
-			binaryString += String.fromCharCode(...chunk);
-		}
-		return btoa(binaryString);
 	};
 
 	const startRecording = async () => {
@@ -160,7 +114,6 @@ export default function Home() {
 			});
 
 			const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
 			mediaRecorder.ondataavailable = (event) => {
 				if (event.data.size > 0) {
 					audioChunksRef.current.push(event.data);
@@ -169,13 +122,18 @@ export default function Home() {
 			mediaRecorder.onstop = async () => {
 				const audioChunks = audioChunksRef.current;
 				const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
-				const base64Audio = await convertTo16BitPCM(audioBlob);
+				const base64Audio = await convertRawAudioTo16BitPCMBase64(audioBlob);
 				audioChunks.current = [];
 
-				sendAudioToAPI(base64Audio);
+				websocketRef.current.send(
+					JSON.stringify({
+						type: "begin_conversation",
+						audio: base64Audio,
+					})
+				);
 			};
-
 			mediaRecorder.start(100);
+
 			mediaRecorderRef.current = mediaRecorder;
 			setIsRecording(true);
 		} catch (e) {
@@ -192,42 +150,22 @@ export default function Home() {
 		}
 	};
 
-	const playAudioAuto = async (audioData) => {
+	const playAudio = async (float32Array) => {
 		try {
 			const audioContext = new AudioContext({ sampleRate: 24000 }); // Match 24kHz sample rate
 
-			const rawData = new Int16Array(audioData); // 16-bit PCM
-			const float32Array = new Float32Array(rawData.length);
-
-			for (let i = 0; i < rawData.length; i++) {
-				float32Array[i] = rawData[i] / 32768.0; // Normalize to -1.0 to 1.0
-			}
-
+			const source = audioContext.createBufferSource();
 			const audioBuffer = audioContext.createBuffer(1, float32Array.length, audioContext.sampleRate);
 			audioBuffer.getChannelData(0).set(float32Array);
 
-			const source = audioContext.createBufferSource();
 			source.buffer = audioBuffer;
 			source.connect(audioContext.destination);
 			source.onended = () => source.disconnect();
+
 			source.start();
 		} catch (error) {
 			enqueueSnackbar(`Audio playback error: ${error.message}`, { variant: "error" });
 		}
-	};
-
-	const sendAudioToAPI = (base64Audio) => {
-		if (!websocketRef.current || websocketRef.current.readyState !== WebSocket.OPEN) {
-			enqueueSnackbar("Not connected to service", { variant: "error" });
-			return;
-		}
-
-		websocketRef.current.send(
-			JSON.stringify({
-				type: "begin_conversation",
-				audio: base64Audio,
-			})
-		);
 	};
 
 	const handlePlayAudio = (text) => {
@@ -249,13 +187,6 @@ export default function Home() {
 		<div>
 			<div className="p-4 bg-blue-100 mb-4 rounded">
 				<p>Status: {isConnected ? "Connected" : "Disconnected"}</p>
-
-				{currentTranslation && (
-					<div className="mt-2 p-2 bg-gray-100 rounded">
-						<p className="font-semibold">Translation in progress:</p>
-						<p>{currentTranslation}</p>
-					</div>
-				)}
 			</div>
 
 			<div className="w-full flex flex-col lg:flex-row">
