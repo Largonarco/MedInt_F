@@ -1,4 +1,4 @@
-# Sully Interpreter AI - Frontend Client
+# MedInt - Frontend Client
 
 A Next.js-based frontend application for the Medical Interpreter API that facilitates real-time communication between Spanish-speaking patients and English-speaking doctors.
 
@@ -37,8 +37,8 @@ This frontend application provides a user-friendly interface for the Medical Int
 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/yourusername/sully-interpreter-frontend.git
-cd sully-interpreter-frontend
+git clone https://github.com/Largonarco/MedInt_F.git
+cd MedInt_F
 ```
 
 2. **Install Dependencies**
@@ -101,7 +101,7 @@ http://localhost:3000
 ## Project Structure
 
 ```
-sully-interpreter-frontend/
+MedInt_F/
 ├── app/                  # Next.js application directory
 │   ├── page.js           # Main application component
 │   ├── layout.tsx        # Root layout component
